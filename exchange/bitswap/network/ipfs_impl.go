@@ -7,10 +7,10 @@ import (
 	"time"
 
 	bsmsg "github.com/ipfs/go-ipfs/exchange/bitswap/message"
+	providers "github.com/ipfs/go-ipfs/providers"
 
 	host "gx/ipfs/QmNmJZL7FQySMtE2BQuLMuZg2EB2CLEunJJUSVSc9YnnbV/go-libp2p-host"
 	logging "gx/ipfs/QmRb5jh8z2E8hMGN2tkvs1yHynUanqnZ3UeKwgN1i9P1F8/go-log"
-	routing "gx/ipfs/QmTiWLZ6Fo5j4KcTVutZJ5KWRRJrbxzmxA4td8NfEdrPh7/go-libp2p-routing"
 	ma "gx/ipfs/QmWWQ2Txc2c6tqjsBpzg5Ar652cHPGNsQQp2SejkNmkUMb/go-multiaddr"
 	pstore "gx/ipfs/QmXauCuJzmzapetmC6W4TuDJLL1yFFrVzSHoWv8YdbmnxH/go-libp2p-peerstore"
 	inet "gx/ipfs/QmXfkENeeBvh3zYA51MaSdGUdBjhQ99cP5WQe8zgr6wchG/go-libp2p-net"
@@ -25,10 +25,10 @@ var log = logging.Logger("bitswap_network")
 var sendMessageTimeout = time.Minute * 10
 
 // NewFromIpfsHost returns a BitSwapNetwork supported by underlying IPFS host
-func NewFromIpfsHost(host host.Host, r routing.ContentRouting) BitSwapNetwork {
+func NewFromIpfsHost(host host.Host, p providers.Interface) BitSwapNetwork {
 	bitswapNetwork := impl{
-		host:    host,
-		routing: r,
+		host:      host,
+		providers: p,
 	}
 	host.SetStreamHandler(ProtocolBitswap, bitswapNetwork.handleNewStream)
 	host.SetStreamHandler(ProtocolBitswapOne, bitswapNetwork.handleNewStream)
@@ -42,8 +42,8 @@ func NewFromIpfsHost(host host.Host, r routing.ContentRouting) BitSwapNetwork {
 // impl transforms the ipfs network interface, which sends and receives
 // NetMessage objects, into the bitswap network interface.
 type impl struct {
-	host    host.Host
-	routing routing.ContentRouting
+	host      host.Host
+	providers providers.Interface
 
 	// inbound messages from the network are forwarded to the receiver
 	receiver Receiver
@@ -136,47 +136,6 @@ func (bsnet *impl) ConnectTo(ctx context.Context, p peer.ID) error {
 	return bsnet.host.Connect(ctx, pstore.PeerInfo{ID: p})
 }
 
-// FindProvidersAsync returns a channel of providers for the given key
-func (bsnet *impl) FindProvidersAsync(ctx context.Context, k *cid.Cid, max int) <-chan peer.ID {
-
-	// Since routing queries are expensive, give bitswap the peers to which we
-	// have open connections. Note that this may cause issues if bitswap starts
-	// precisely tracking which peers provide certain keys. This optimization
-	// would be misleading. In the long run, this may not be the most
-	// appropriate place for this optimization, but it won't cause any harm in
-	// the short term.
-	connectedPeers := bsnet.host.Network().Peers()
-	out := make(chan peer.ID, len(connectedPeers)) // just enough buffer for these connectedPeers
-	for _, id := range connectedPeers {
-		if id == bsnet.host.ID() {
-			continue // ignore self as provider
-		}
-		out <- id
-	}
-
-	go func() {
-		defer close(out)
-		providers := bsnet.routing.FindProvidersAsync(ctx, k, max)
-		for info := range providers {
-			if info.ID == bsnet.host.ID() {
-				continue // ignore self as provider
-			}
-			bsnet.host.Peerstore().AddAddrs(info.ID, info.Addrs, pstore.TempAddrTTL)
-			select {
-			case <-ctx.Done():
-				return
-			case out <- info.ID:
-			}
-		}
-	}()
-	return out
-}
-
-// Provide provides the key to the network
-func (bsnet *impl) Provide(ctx context.Context, k *cid.Cid) error {
-	return bsnet.routing.Provide(ctx, k, true)
-}
-
 // handleNewStream receives a new stream from the network.
 func (bsnet *impl) handleNewStream(s inet.Stream) {
 	defer s.Close()
@@ -203,6 +162,19 @@ func (bsnet *impl) handleNewStream(s inet.Stream) {
 		log.Debugf("bitswap net handleNewStream from %s", s.Conn().RemotePeer())
 		bsnet.receiver.ReceiveMessage(ctx, p, received)
 	}
+}
+
+// FindProvidersAsync returns a channel of providers for the given key
+func (bsnet *impl) FindProvidersAsync(ctx context.Context, k *cid.Cid, max int) <-chan peer.ID {
+	return bsnet.providers.FindProvidersAsync(ctx, k, max)
+}
+
+func (bsnet *impl) FindProviders(ctx context.Context, k *cid.Cid) error {
+	return bsnet.providers.FindProviders(ctx, k)
+}
+
+func (bsnet *impl) Provide(ctx context.Context, k *cid.Cid) error {
+	return bsnet.providers.Provide(k)
 }
 
 func (bsnet *impl) ConnectionManager() ifconnmgr.ConnManager {
