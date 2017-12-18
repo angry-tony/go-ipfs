@@ -323,7 +323,7 @@ You can now check what blocks have been created by:
 			}
 
 			if !local {
-				if err := n.Providers.ProvideRecursive(req.Context(), nd, dserv); err != nil {
+				if err := n.Providers.ProvideRecursive(req.Context, nd, dserv); err != nil {
 					return err
 				}
 			}
